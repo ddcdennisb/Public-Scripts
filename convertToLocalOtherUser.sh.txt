@@ -1,0 +1,468 @@
+#!/bin/bash
+#
+## =======================================================================================
+#
+# Exit codes
+#	rootcheck                     exit 1
+#	OSXVersioncheck               exit 2
+#	CurrentUserIDcheck            exit 3
+#	MobileAccountcheck            exit 4
+#	MessageToUser                 exit 5
+#	pmsetPowerStatus              exit 6
+#	CaptureUserPassword_cancel    exit 7
+#	CaptureUserPassword_blank     exit 8
+#	FVtmpUser                     exit 9
+#
+#####################################################################################################
+#
+# DEFINE VARIABLES & READ IN PARAMETERS
+#
+#####################################################################################################
+#
+# OS X Version
+sw_vers_Full=$(/usr/bin/sw_vers -productVersion)
+sw_vers_Major=$(/usr/bin/sw_vers -productVersion | /usr/bin/cut -d. -f 1,2)
+sw_vers_MajorNumber=$(/usr/bin/sw_vers -productVersion | /usr/bin/cut -d. -f 2)
+
+computerName=$(/usr/sbin/scutil --get ComputerName)
+currentuser=$(/usr/bin/osascript -e "text returned of (display dialog "Please enter the username to be converted:" default answer \"\" buttons {\"Ok\" , \"Cancel\"} default button 1 with title\"Username\")") >/dev/null 2>&1
+#currentuser=$(/bin/ls -l /dev/console | /usr/bin/awk '{print $3}')
+currentuserID=$(/usr/bin/id -u $currentuser)
+DisplayDialogMessage=""
+#
+# HARDCODED VALUE FOR "RebootTrigger" IS SET HERE - Specify the custom trigger for a reboot policy
+RebootTrigger="RebootMacImmediately"
+# CHECK TO SEE IF A VALUE WAS PASSED IN PARAMETER 4 AND, IF SO, ASSIGN TO "RebootTrigger"
+# If a value is specified via a casper policy, it will override the hardcoded value in the script.
+#
+/bin/echo "$computerName" is running is OS X version "$sw_vers_Full"
+/bin/echo "currentuser: 	$currentuser"
+/bin/echo "RebootTrigger: 	$RebootTrigger"
+#
+#####################################################################################################
+#
+# Functions to call on
+#
+#####################################################################################################
+
+#
+### Ensure we are running this script as root ###
+rootcheck () {
+/bin/echo rootcheck
+if [ "$(/usr/bin/whoami)" != "root" ] ; then
+  /bin/echo "This script must be run as root or sudo."
+  exit 1
+fi
+}
+###
+#
+
+#
+### Ensure we are running at least OS X 10.10.x ###
+OSXVersioncheck () {
+/bin/echo OSXVersioncheck
+if [ "$sw_vers_MajorNumber" -lt 10 ]; then
+  /bin/echo "This script requires OS X 10.10 or greater."
+  exit 2
+fi
+}
+###
+#
+
+#
+### Check to see if the current user's UID is greater than 999. ###
+CurrentUserIDcheck () {
+/bin/echo CurrentUserIDcheck
+if [ "$currentuserID" -lt 1000 ]; then
+	/bin/echo "This user is already a local account."
+	DisplayDialogMessage="This user is already a local account."
+	/usr/bin/sudo -u "$currentuser" /usr/bin/osascript -e "display dialog \"$DisplayDialogMessage\" with icon stop buttons {\"End\"} default button 1"
+	exit 3
+fi
+}
+###
+#
+
+#
+### Check to see if the current user is a mobile account ###
+MobileAccountcheck () {
+/bin/echo MobileAccountcheck
+accountAuthAuthority="$(/usr/bin/dscl . read /Users/$currentuser AuthenticationAuthority)"
+if [[ ! "$accountAuthAuthority" =~ "LocalCachedUser" ]] ; then
+	/bin/echo "This is not an Active Directory mobile account."
+	DisplayDialogMessage="This is not an Active Directory mobile account."
+	/usr/bin/sudo -u "$currentuser" /usr/bin/osascript -e "display dialog \"$DisplayDialogMessage\" with icon stop buttons {\"End\"} default button 1"
+	exit 4
+fi
+}
+###
+#
+
+#
+### Message to user, explaining what this script will do. ###
+MessageToUser () {
+/bin/echo MessageToUser
+DisplayDialogMessage="This will convert your current network user account to a local account.
+
+Please SAVE all files and QUIT all apps before proceeding.
+
+When complete, your computer will REBOOT.
+
+Your system MUST be connected to AC power to continue."
+/usr/bin/sudo -u "$currentuser" /usr/bin/osascript -e "display dialog \"$DisplayDialogMessage\" with title \"Reboot Warning\" with icon caution" >/dev/null 2>&1
+	# Stop everything if the cancel button is pressed.
+if [ $? -eq 1 ];
+	then /bin/echo "User canceled policy.";
+	exit 5
+fi
+}
+###
+#
+
+#
+### Check to see if the system is connected to AC power. ###
+pmsetPowerStatus () {
+/bin/echo pmsetPowerStatus
+PowerDraw=$(/usr/bin/pmset -g ps | /usr/bin/awk -F "'" '{ print $2;exit }')
+
+until [ "$PowerDraw" == "AC Power" ]; do
+	/bin/echo "Now drawing from 'Battery Power'"
+	DisplayDialogMessage="Please connected your system to AC power."
+	/usr/bin/sudo -u "$currentuser" /usr/bin/osascript -e "display dialog \"$DisplayDialogMessage\" with title \"Power Warning\" with icon stop" >/dev/null 2>&1
+	# Stop everything if the cancel button is pressed.
+	if [ $? -eq 1 ];
+		then /bin/echo "User canceled policy.";
+		exit 6
+	fi
+	/bin/sleep 2
+	PowerDraw=$(/usr/bin/pmset -g ps | /usr/bin/awk 'NR>1{exit};1' | /usr/bin/awk '{print $4,$5}' | /usr/bin/sed "s/'//g")
+done
+/bin/echo "Now drawing from 'AC Power'"
+}
+###
+#
+
+#
+### For creating a User we need some input ###
+UserInfo () {
+/bin/echo UserInfo
+USERNAME="$currentuser"
+/bin/echo "USERNAME: 	$USERNAME"
+#
+FULLNAME=$(/usr/bin/id -F $USERNAME)
+/bin/echo "FULLNAME: 	$FULLNAME"
+#
+USERNAMEGROUPS=$(/usr/bin/id $USERNAME)
+/bin/echo "USERNAMEGROUPS: 	$USERNAMEGROUPS"
+}
+###
+#
+
+#
+### Begin Password stuff ###
+CaptureUserPassword () {
+/bin/echo CaptureUserPassword
+# Display Dialog to capture user password.
+DisplayDialogMessage="Please enter the password for user account - $USERNAME."
+PASSWORD=$(/usr/bin/sudo -u "$currentuser" /usr/bin/osascript -e "text returned of (display dialog \"$DisplayDialogMessage\" default answer \"\" buttons {\"Ok\" , \"Cancel\"} default button 1 with title\"Password\" with hidden answer)") >/dev/null 2>&1
+# Stop everything if the cancel button is pressed.
+if [ $? -eq 1 ];
+	then /bin/echo "User canceled policy.";
+	exit 7
+fi
+# Blank passwords don't work.
+while [ "$PASSWORD" == "" ];
+do
+	/bin/echo "Password is blank";
+	DisplayDialogMessage="A BLANK PASSWORD IS INVALID.
+	Please enter the password for user account - $USERNAME."
+	PASSWORD=$(/usr/bin/sudo -u "$currentuser" /usr/bin/osascript -e "text returned of (display dialog \"$DisplayDialogMessage\" default answer \"\" buttons {\"Ok\" , \"Cancel\"} default button 1 with title\"Password\" with hidden answer)") >/dev/null 2>&1
+	# Stop everything if the cancel button is pressed.
+	if [ $? -eq 1 ];
+		then /bin/echo "User canceled policy.";
+		exit 8
+	fi
+done
+
+# Verify user Password is correct
+PASSWORDCHECK=$(/usr/bin/dscl /Local/Default -authonly $USERNAME $PASSWORD)
+until [ "$PASSWORDCHECK" == "" ];
+do
+	/bin/echo "Incorrect password, please retry."
+	DisplayDialogMessage="INCORRECT PASSWORD
+	Please re-enter the password for user account - $USERNAME."
+	PASSWORD=$(/usr/bin/sudo -u "$currentuser" /usr/bin/osascript -e "text returned of (display dialog \"$DisplayDialogMessage\" default answer \"\" buttons {\"Ok\" , \"Cancel\"} default button 1 with title\"Password\" with hidden answer)") >/dev/null 2>&1
+	# Stop everything if the cancel button is pressed.
+	if [ $? -eq 1 ];
+		then /bin/echo "User canceled policy.";
+		exit 7
+	fi
+	# Blank passwords don't work.
+	while [ "$PASSWORD" == "" ];
+	do
+		/bin/echo "Password is blank";
+		DisplayDialogMessage="A BLANK PASSWORD IS INVALID.
+		Please enter the password for user account - $USERNAME."
+		PASSWORD=$(/usr/bin/sudo -u "$currentuser" /usr/bin/osascript -e "text returned of (display dialog \"$DisplayDialogMessage\" default answer \"\" buttons {\"Ok\" , \"Cancel\"} default button 1 with title\"Password\" with hidden answer)") >/dev/null 2>&1
+		# Stop everything if the cancel button is pressed.
+		if [ $? -eq 1 ];
+			then /bin/echo "User canceled policy.";
+			exit 8
+		fi
+	done
+	PASSWORDCHECK=$(/usr/bin/dscl /Local/Default -authonly $USERNAME $PASSWORD)
+done
+}
+### End Password stuff ###
+#
+
+#
+### Begin FileVault stuff ###
+FileVaultStuff () {
+/bin/echo FileVaultStuff
+# Check the status of FileVault
+FV2Stat=$(/usr/bin/fdesetup status)
+/bin/echo "FV2Stat: $FV2Stat"
+# Check the currently logged in user a FileVault user.
+FVUserCheck=$(/usr/bin/fdesetup list | /usr/bin/grep "$USERNAME," |  /usr/bin/awk -F',' '{print $1}')
+#/bin/echo "FVUserCheck: $FVUserCheck"
+#
+if [[ "$FV2Stat" =~ "FileVault is On" ]] && [[ ! "$FV2Stat" =~ "Encryption in progress" ]] && [[ "$FVUserCheck" == "$USERNAME" ]]; then
+	/bin/echo "Do FileVault Stuff"
+	# Create a tmp filevault account
+	# This is a very complex password in case a complex local password profile is in use.
+	# Do not use any special characters beside "@". Otherwise the plist does not like it.
+	# This also does not use any repeating characters.
+	# If this script fails, the most likely problem is this password does not meet the password rules.
+	FVtmpUserPASSWORD="tmpPAssw0rd"
+	FVtmpUser="fvtmpuser"
+	# Delete FVtmpUser just in case it already exists
+	if [ "$sw_vers_MajorNumber" -ge 13 ]; then
+		echo "Major Version is greater or equal to: $sw_vers_MajorNumber"
+		/usr/sbin/sysadminctl -adminUser $USERNAME -adminPassword $PASSWORD -deleteUser $FVtmpUser
+	else
+		echo "Major Version is less than: $sw_vers_MajorNumber"
+		/usr/sbin/sysadminctl -deleteUser $FVtmpUser
+	fi
+	# Clear the list of deleted user accounts
+	/bin/rm -f /Library/Preferences/com.apple.preferences.accounts.plist
+    #
+	/bin/echo "Creating $FVtmpUser account."
+	if [ "$sw_vers_MajorNumber" -ge 13 ]; then
+		echo "Major Version is greater or equalto: $sw_vers_MajorNumber"
+		/usr/sbin/sysadminctl -adminUser $USERNAME -adminPassword $PASSWORD -addUser $FVtmpUser -fullName $FVtmpUser -password $FVtmpUserPASSWORD -UID 456 -home /private/tmp/$FVtmpUser -admin
+	else
+		echo "Major Version is less than: $sw_vers_MajorNumber"
+		/usr/sbin/sysadminctl -addUser $FVtmpUser -fullName $FVtmpUser -password $FVtmpUserPASSWORD -UID 456 -home /private/tmp/$FVtmpUser -admin
+	fi
+	#
+	# create the plist file:
+	/bin/echo '<?xml version="1.0" encoding="UTF-8"?>
+	<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+	<plist version="1.0">
+	<dict>
+	<key>Password</key>
+	<string>'$PASSWORD'</string>
+	<key>AdditionalUsers</key>
+	<array>
+		<dict>
+			<key>Username</key>
+			<string>'$FVtmpUser'</string>
+			<key>Password</key>
+			<string>'$FVtmpUserPASSWORD'</string>
+		</dict>
+	</array>
+	</dict>
+	</plist>' > /private/tmp/fvenable.plist
+	#
+	/usr/bin/fdesetup add -inputplist < /tmp/fvenable.plist -verbose
+	# clean up
+	/bin/rm -f /tmp/fvenable.plist
+	#
+	# make sure it all worked.
+	FVtmpUserCheck=$(/usr/bin/fdesetup list | /usr/bin/grep "$FVtmpUser," |  /usr/bin/awk -F',' '{print $1}')
+	/bin/echo "FVtmpUserCheck: $FVtmpUserCheck"
+	/bin/echo "FVtmpUser: $FVtmpUser"
+	if [[ ! "$FVtmpUserCheck" == "$FVtmpUser" ]]; then
+		/bin/echo "Error creating $FVtmpUser account."
+		exit 9
+	else
+		FVtmpUserCreated="yes"
+	fi
+else
+    /bin/echo "Nothing needs to happen with FileVault. Proceeding..."
+    # Create a tmp filevault account
+	# This is a very complex password in case a complex local password profile is in use.
+	# Do not use any special characters beside "@". Otherwise the plist does not like it.
+	# This also does not use any repeating characters.
+	# If this script fails, the most likely problem is this password does not meet the password rules.
+	FVtmpUserPASSWORD="tmpPAssw0rd"
+	FVtmpUser="fvtmpuser"
+	# Delete FVtmpUser just in case it already exists
+	if [ "$sw_vers_MajorNumber" -ge 13 ]; then
+		echo "Major Version is greater or equal to: $sw_vers_MajorNumber"
+		/usr/sbin/sysadminctl -adminUser $USERNAME -adminPassword $PASSWORD -deleteUser $FVtmpUser
+	else
+		echo "Major Version is less than: $sw_vers_MajorNumber"
+		/usr/sbin/sysadminctl -deleteUser $FVtmpUser
+	fi
+    # Clear the list of deleted user accounts
+	/bin/rm -f /Library/Preferences/com.apple.preferences.accounts.plist
+    #
+	/bin/echo "Creating $FVtmpUser account."
+	if [ "$sw_vers_MajorNumber" -ge 13 ]; then
+		echo "Major Version is greater or equalto: $sw_vers_MajorNumber"
+		/usr/sbin/sysadminctl -adminUser $USERNAME -adminPassword $PASSWORD -addUser $FVtmpUser -fullName $FVtmpUser -password $FVtmpUserPASSWORD -UID 456 -home /private/tmp/$FVtmpUser -admin
+	else
+		echo "Major Version is less than: $sw_vers_MajorNumber"
+		/usr/sbin/sysadminctl -addUser $FVtmpUser -fullName $FVtmpUser -password $FVtmpUserPASSWORD -UID 456 -home /private/tmp/$FVtmpUser -admin
+	fi
+    FVtmpUserCreated="yes"
+fi
+}
+### End FileVault stuff ###
+#
+
+#
+### Begin Account stuff ###
+AccountStuff () {
+/bin/echo AccountStuff
+# Is this an admin user?
+/bin/echo "Is $USERNAME an admin user?"
+if [[ "$USERNAMEGROUPS" == *"80(admin)"* ]];then
+	/bin/echo "$USERNAME is an admin user."
+	MAKE_ADMIN="-admin"
+else
+    /bin/echo "$USERNAME is NOT an admin user."
+    MAKE_ADMIN=""
+fi
+
+# Do Account stuff
+/bin/echo "Delete network user account. Keep home directory"
+/usr/sbin/sysadminctl -deleteUser $USERNAME -keepHome
+/bin/echo "Clear the list of deleted user accounts"
+/bin/rm -f /Library/Preferences/com.apple.preferences.accounts.plist
+/bin/echo "Create new local user account."
+/usr/sbin/sysadminctl -addUser $USERNAME -fullName "$FULLNAME" -password $PASSWORD $MAKE_ADMIN # -UID $LOCALUSERID
+
+# be sure to get $LOCALUSERID from dscl
+LOCALUSERID=$(/usr/bin/dscl . -read /Users/$USERNAME UniqueID | /usr/bin/awk '{print $2}')
+/bin/echo "LOCALUSERID: $LOCALUSERID"
+
+#chown Home Directory to new UID
+/usr/bin/chflags -R nouchg /Users/$USERNAME/
+/usr/sbin/chown -R $LOCALUSERID:staff /Users/$USERNAME/
+/bin/ls -al /Users/ | /usr/bin/grep $USERNAME
+/bin/ls -aln /Users/ | /usr/bin/grep $USERNAME
+
+/bin/echo "Run id command for $USERNAME"
+/usr/bin/id $USERNAME
+
+# Add new local account to FileVault
+/bin/echo "FVtmpUserCheck: $FVtmpUserCheck"
+/bin/echo "FVtmpUser: $FVtmpUser"
+
+if [[ "$FVtmpUserCreated" == "yes" ]]; then
+	# create the plist file:
+	/bin/echo '<?xml version="1.0" encoding="UTF-8"?>
+	<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+	<plist version="1.0">
+	<dict>
+	<key>Password</key>
+	<string>'$FVtmpUserPASSWORD'</string>
+	<key>AdditionalUsers</key>
+	<array>
+		<dict>
+			<key>Username</key>
+			<string>'$USERNAME'</string>
+			<key>Password</key>
+			<string>'$PASSWORD'</string>
+		</dict>
+	</array>
+	</dict>
+	</plist>' > /private/tmp/fvenable.plist
+	#
+	/usr/bin/fdesetup add -inputplist < /tmp/fvenable.plist -verbose
+	# clean up
+	/bin/rm -f /tmp/fvenable.plist
+	# Delete FVtmpUser
+	/usr/sbin/sysadminctl -deleteUser $FVtmpUser
+	# Clear the list of deleted user accounts
+	/bin/rm -f /Library/Preferences/com.apple.preferences.accounts.plist
+fi
+}
+### End Account stuff ###
+#
+
+#
+### Begin Cleanup ###
+CleanupStuff () {
+/bin/echo CleanupStuff
+# Clear the password variables to cleanup.
+PASSWORD=""
+FVtmpUserPASSWORD=""
+# Clear any FileVault plists
+/bin/rm -f /tmp/fvenable.plist
+# Clear the list of deleted user accounts
+/bin/rm -f /Library/Preferences/com.apple.preferences.accounts.plist
+# Clear the user's ByHost MicrosoftLyncRegisttionDB plists. This can cause Lync to crash after converting the user account.
+# There may be other ByHost plist files that may also misbehave after converting the user account.
+/bin/rm -Rf /Users/$USERNAME/Library/Preferences/ByHost/MicrosoftLyncRegisttionDB.*
+}
+### End Cleanup ###
+#
+
+#
+### Logout Current User ###
+# This can potentially be used instead of a restart.
+# It takes 60 seconds to log the current user out.
+LogoutCurrentUser () {
+/bin/echo LogoutCurrentUser
+/usr/bin/osascript << EOF
+ignoring application responses
+tell application "loginwindow" to «event aevtlogo»
+end ignoring
+EOF
+}
+### End Cleanup ###
+#
+
+####################################################################################################
+#
+# SCRIPT CONTENTS
+#
+####################################################################################################
+
+rootcheck
+
+OSXVersioncheck
+
+CurrentUserIDcheck
+
+MobileAccountcheck
+
+MessageToUser
+
+pmsetPowerStatus
+
+UserInfo
+
+CaptureUserPassword
+
+FileVaultStuff
+
+AccountStuff
+
+CleanupStuff
+
+####################################################################################################
+#
+# Reboot and logout options
+#
+####################################################################################################
+
+#LogoutCurrentUser # This can potentially be used instead of a restart. It takes 60 seconds to log the current user out.
+
+shutdown -r now # uncomment this line if you are running the script manually.
+exit 0
+
