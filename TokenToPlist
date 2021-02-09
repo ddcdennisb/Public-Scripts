@@ -1,0 +1,36 @@
+#!/bin/sh
+
+#Get Raw token value
+raw=$(cat /PATH/TO/token.jwt)
+
+#decode Raw Token with openssl
+function jwt() {
+  for part in 1 2; do
+    b64="$(cut -f$part -d. <<< "$1" | tr '_-' '/+')"
+    len=${#b64}
+    n=$((len % 4))
+    if [[ 2 -eq n ]]; then
+      b64="${b64}=="
+    elif [[ 3 -eq n ]]; then
+      b64="${b64}="
+    fi
+    d="$(openssl enc -base64 -d -A <<< "$b64")"
+    echo "$d"
+    # don't decode further if this is an encrypted JWT (JWE)
+    if [[ 1 -eq part ]] && grep '"enc":' <<< "$d" >/dev/null ; then
+        exit 0
+    fi
+  done
+}
+#Main Actions
+
+#Output decoded Raw Token to json file
+jwt $raw >> /private/var/tmp/raw.json
+/bin/sleep 1
+
+#Remove the first json object so json file can be converted to a plist
+tail -n 1 /private/var/tmp/raw.json >> /private/var/tmp/raw2.json
+/bin/sleep 1
+
+#Convert json to plist so that it can be read by defaults command 
+plutil -convert xml1 /private/var/tmp/raw2.json -o /PATH/TO/SAVE/raw.plist
